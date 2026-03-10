@@ -1,0 +1,478 @@
+// prisma/schema.prisma
+// PDGE — Predictive Disaster Graph Engine
+// Run: npx prisma migrate dev --name <migration_name>
+// Add ONE model at a time, migrate, test, then add the next.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 1 — User
+// Migrate first. Every other model depends on createdBy.
+// npx prisma migrate dev --name add_user
+// ═══════════════════════════════════════════════════════════
+enum Role {
+  ADMIN
+  AGENCY_LEAD
+  OPERATOR
+  VIEWER
+}
+
+model User {
+  id             String    @id @default(uuid())
+  email          String    @unique
+  passwordHash   String
+  name           String
+  role           Role      @default(VIEWER)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations — add these as you add each model below
+  incidents      Incident[]
+  auditLogs      AuditLog[]
+
+  @@index([email])
+  @@index([organizationId])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 2 — Organization (tenantId foundation)
+// Every record in the system belongs to an organization.
+// This is the multi-tenancy anchor. Add tenantId to every
+// future model — never skip this.
+// npx prisma migrate dev --name add_organization
+// ═══════════════════════════════════════════════════════════
+model Organization {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique   // e.g. "mumbai-ndrf"
+  tier        String    @default("STANDARD") // STANDARD | ENTERPRISE
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  users       User[]
+  graphNodes  GraphNode[]
+  graphEdges  GraphEdge[]
+  resources   Resource[]
+  incidents   Incident[]
+
+  @@index([slug])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 3 — GraphNode (city graph nodes)
+// The city exists as nodes in a graph. Every hospital,
+// depot, shelter, and zone is a node.
+// npx prisma migrate dev --name add_graph_node
+// ═══════════════════════════════════════════════════════════
+enum NodeType {
+  HOSPITAL
+  DEPOT
+  SHELTER
+  ZONE
+  CHECKPOINT
+}
+
+model GraphNode {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  label          String                    // "Sector 14 Hospital"
+  type           NodeType
+  latitude       Float
+  longitude      Float
+  capacity       Int          @default(100)
+  currentLoad    Int          @default(0)
+  population     Int          @default(0)  // people in zone
+  disasterRisk   Float        @default(0)  // 0.0 – 1.0, updated by simulation
+  isActive       Boolean      @default(true)
+  metadata       Json?                     // extra data, flexible
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  // Relations
+  edgesFrom      GraphEdge[]  @relation("EdgeFrom")
+  edgesTo        GraphEdge[]  @relation("EdgeTo")
+  resources      Resource[]
+  incidents      Incident[]   @relation("OriginNode")
+
+  @@index([organizationId])
+  @@index([type])
+  @@index([disasterRisk])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 4 — GraphEdge (connections between nodes)
+// Edges are roads. Weight = travel time in minutes.
+// Blocked road = status BLOCKED (Dijkstra cannot use it).
+// npx prisma migrate dev --name add_graph_edge
+// ═══════════════════════════════════════════════════════════
+enum EdgeStatus {
+  OPEN
+  SLOW         // congested, weight multiplied by slowFactor
+  BLOCKED      // impassable, excluded from routing
+}
+
+model GraphEdge {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  fromNodeId     String
+  fromNode       GraphNode    @relation("EdgeFrom", fields: [fromNodeId], references: [id])
+  toNodeId       String
+  toNode         GraphNode    @relation("EdgeTo",   fields: [toNodeId],   references: [id])
+
+  weight         Float        @default(1.0)  // travel time in minutes
+  status         EdgeStatus   @default(OPEN)
+  slowFactor     Float        @default(1.0)  // multiplied to weight when SLOW
+  blockedReason  String?
+  distance       Float?       // km, optional
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([fromNodeId, toNodeId])           // no duplicate edges
+  @@index([organizationId])
+  @@index([status])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 5 — Resource
+// Ambulances, fire trucks, rescue teams, drones.
+// currentNodeId = where the resource IS RIGHT NOW.
+// targetNodeId  = where it's been sent.
+// npx prisma migrate dev --name add_resource
+// ═══════════════════════════════════════════════════════════
+enum ResourceType {
+  AMBULANCE
+  FIRE_TRUCK
+  RESCUE_TEAM
+  DRONE
+  SUPPLY_TRUCK
+  HELICOPTER
+}
+
+enum ResourceStatus {
+  IDLE
+  TRANSIT
+  DEPLOYED
+  MAINTENANCE
+  PRE_POSITIONED  // PDGE moved it predictively
+}
+
+model Resource {
+  id             String         @id @default(uuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+
+  label          String                      // "AMB-01"
+  type           ResourceType
+  status         ResourceStatus @default(IDLE)
+
+  currentNodeId  String?
+  currentNode    GraphNode?     @relation(fields: [currentNodeId], references: [id])
+
+  targetNodeId   String?        // where it's headed (null if idle)
+  routeEdgeIds   String[]       // ordered edge IDs for current route
+  etaMinutes     Int?           // estimated minutes to targetNode
+
+  // Physical properties
+  capacity       Int            @default(4)
+  fuelLevel      Float          @default(1.0)   // 0.0 – 1.0
+  fatigueLevel   Float          @default(0.0)   // 0.0 – 1.0
+  skillLevel     Int            @default(3)      // 1–5
+  geographicRange Float         @default(50.0)  // km
+
+  isActive       Boolean        @default(true)
+  metadata       Json?
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  // Relations
+  assignments    ResourceAssignment[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([currentNodeId])
+  @@index([type])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 6 — Incident
+// A verified disaster event.
+// trustScore is populated by TrustScoreService after reports.
+// originNodeId = the graph node where disaster started.
+// npx prisma migrate dev --name add_incident
+// ═══════════════════════════════════════════════════════════
+enum DisasterType {
+  FLOOD
+  FIRE
+  EARTHQUAKE
+  CYCLONE
+  LANDSLIDE
+  CHEMICAL
+  UNKNOWN
+}
+
+enum IncidentStatus {
+  UNVERIFIED    // reports received, trust score < 70
+  VERIFIED      // trust score >= 70, simulation triggered
+  ACTIVE        // resources deployed
+  MONITORING    // situation stabilizing
+  CLOSED        // incident over, learning loop can run
+}
+
+model Incident {
+  id             String         @id @default(uuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+
+  type           DisasterType   @default(UNKNOWN)
+  status         IncidentStatus @default(UNVERIFIED)
+  description    String?
+
+  originNodeId   String?
+  originNode     GraphNode?     @relation("OriginNode", fields: [originNodeId], references: [id])
+
+  trustScore     Float          @default(0)    // 0–100, set by TrustScoreService
+  reportCount    Int            @default(0)
+  verifiedAt     DateTime?
+  closedAt       DateTime?
+
+  // Who submitted + who approved
+  reportedById   String?
+  reportedBy     User?          @relation(fields: [reportedById], references: [id])
+  approvedById   String?        // human who approved allocation plan
+
+  latitude       Float?         // raw GPS from first report
+  longitude      Float?
+  photoUrls      String[]       // evidence photos
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  // Relations
+  trustScores    TrustScore[]
+  simResults     SimulationResult[]
+  auditLogs      AuditLog[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([type])
+  @@index([originNodeId])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 7 — TrustScore
+// One record per report received for an incident.
+// Multiple reports accumulate → score rises → VERIFIED.
+// npx prisma migrate dev --name add_trust_score
+// ═══════════════════════════════════════════════════════════
+enum TrustVerdict {
+  UNVERIFIED
+  ACCUMULATING
+  VERIFIED
+  REJECTED
+}
+
+model TrustScore {
+  id             String       @id @default(uuid())
+  incidentId     String
+  incident       Incident     @relation(fields: [incidentId], references: [id])
+
+  score          Float                        // 0–100
+  verdict        TrustVerdict @default(UNVERIFIED)
+
+  // Scoring factors
+  gpsValid       Boolean      @default(false)
+  clusterCount   Int          @default(1)    // corroborating reports
+  sensorData     Json?                       // accelerometer, etc.
+  reporterHistory Float       @default(0.5) // reporter reliability score
+
+  // Raw report data
+  reporterLat    Float?
+  reporterLng    Float?
+  claimedNodeId  String?
+  distanceToNode Float?       // metres
+
+  createdAt      DateTime     @default(now())
+
+  @@index([incidentId])
+  @@index([verdict])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 8 — SimulationResult
+// Output of the Python BFS spread simulation.
+// forecastT2h/T4h/T6h = risk map: { nodeId: 0.0–1.0 }
+// allocationPlan = the OR-Tools output.
+// npx prisma migrate dev --name add_simulation_result
+// ═══════════════════════════════════════════════════════════
+enum SimulationStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model SimulationResult {
+  id             String           @id @default(uuid())
+  incidentId     String
+  incident       Incident         @relation(fields: [incidentId], references: [id])
+
+  status         SimulationStatus @default(PENDING)
+  disasterType   DisasterType
+
+  // BFS spread forecasts — stored as JSON: { nodeId: riskFloat }
+  forecastT2h    Json?
+  forecastT4h    Json?
+  forecastT6h    Json?
+
+  // Spread parameters used
+  spreadCoefficient Float        @default(0.35)
+  originRisk     Float           @default(1.0)
+
+  // Accuracy tracking (filled in by learning loop after incident closes)
+  predictionErrorT2h Float?
+  predictionErrorT4h Float?
+  predictionErrorT6h Float?
+  overallAccuracy   Float?
+
+  confidence     Float?           // 0.0 – 1.0
+  algorithmUsed  String?          // "GREEDY" | "CPSAT" | "GENETIC"
+
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime         @default(now())
+
+  // Relations
+  allocationPlans AllocationPlan[]
+
+  @@index([incidentId])
+  @@index([status])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 9 — AllocationPlan
+// The output of the OptimizationEngine.
+// One plan per simulation run. Contains N assignments.
+// humanApproved = true only after operator clicks Approve.
+// npx prisma migrate dev --name add_allocation_plan
+// ═══════════════════════════════════════════════════════════
+enum PlanStatus {
+  GENERATED
+  PENDING_APPROVAL
+  APPROVED
+  OVERRIDDEN
+  EXPIRED
+}
+
+model AllocationPlan {
+  id                 String       @id @default(uuid())
+  simulationResultId String
+  simulationResult   SimulationResult @relation(fields: [simulationResultId], references: [id])
+
+  status             PlanStatus   @default(GENERATED)
+  strategyUsed       String       // "GREEDY" | "LP" | "CPSAT" | "GENETIC"
+  confidence         Float        @default(0)
+  totalResources     Int          @default(0)
+
+  humanApproved      Boolean      @default(false)
+  approvedById       String?
+  approvedAt         DateTime?
+  overrideReason     String?
+
+  // Expiry — plan is stale after this
+  expiresAt          DateTime?
+
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  // Relations
+  assignments        ResourceAssignment[]
+
+  @@index([simulationResultId])
+  @@index([status])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 10 — ResourceAssignment (child of AllocationPlan)
+// One row per resource in the plan.
+// This is the atomic unit of dispatch.
+// ═══════════════════════════════════════════════════════════
+enum AssignmentPriority {
+  CRITICAL
+  HIGH
+  NORMAL
+}
+
+model ResourceAssignment {
+  id               String              @id @default(uuid())
+  planId           String
+  plan             AllocationPlan      @relation(fields: [planId], references: [id])
+
+  resourceId       String
+  resource         Resource            @relation(fields: [resourceId], references: [id])
+
+  fromNodeId       String
+  toNodeId         String
+  routeEdgeIds     String[]
+  etaMinutes       Float
+  priority         AssignmentPriority  @default(NORMAL)
+  confidence       Float               @default(0)
+
+  fallbackResourceId String?
+
+  // Execution tracking
+  dispatchedAt     DateTime?
+  arrivedAt        DateTime?
+  actualEtaMinutes Float?
+
+  createdAt        DateTime            @default(now())
+
+  @@index([planId])
+  @@index([resourceId])
+  @@index([priority])
+}
+
+// ═══════════════════════════════════════════════════════════
+// MODEL 11 — AuditLog
+// EVERY decision logged. Required for government deployment.
+// Never delete audit logs — append only.
+// ═══════════════════════════════════════════════════════════
+model AuditLog {
+  id           String   @id @default(uuid())
+  incidentId   String?
+  incident     Incident? @relation(fields: [incidentId], references: [id])
+  userId       String?
+  user         User?     @relation(fields: [userId], references: [id])
+
+  action       String   // "PLAN_APPROVED", "RESOURCE_DISPATCHED", "OVERRIDE", etc.
+  entity       String   // "AllocationPlan", "Resource", etc.
+  entityId     String?
+  details      Json?    // full context snapshot
+  ipAddress    String?
+
+  createdAt    DateTime @default(now())
+
+  @@index([incidentId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
