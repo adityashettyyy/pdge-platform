@@ -74,3 +74,9 @@ Thumbs.db
 *.tmp
 *.temp
 .cache/
+
+# Frontend
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.vite
