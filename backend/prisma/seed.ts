@@ -1,209 +1,161 @@
 // prisma/seed.ts
-// Seeds the database with 12 city nodes and all edges.
-// Run: npx ts-node prisma/seed.ts
+// Complete Mumbai NDRF seed — 12 nodes, 20 roads (40 directed edges),
+// 10 resources, 2 users. Population data is required for the severity classifier.
 //
-// This creates the city graph that PDGE operates on.
-// Run once after your first migration.
+// Run: npx ts-node prisma/seed.ts
+// Re-run safely — all operations are idempotent.
 
-import { PrismaClient } from '@prisma/client'
-/// <reference types="node" />
-declare var process: any;
+import {
+  PrismaClient,
+  NodeType, EdgeStatus,
+  ResourceType, ResourceStatus, Role,
+} from "@prisma/client";
+import * as bcrypt from "bcryptjs";
 
-import bcrypt from 'bcryptjs'
-
-const prisma = new PrismaClient()
+const prisma = new PrismaClient();
 
 async function main() {
-  console.log('\n🌱 Seeding PDGE database...\n')
+  console.log("Seeding PDGE database…");
 
-  // ─── Organization ───────────────────────────────────
+  // ── Organisation ──────────────────────────────────────────────────────────
   const org = await prisma.organization.upsert({
-    where:  { slug: 'mumbai-ndrf' },
+    where:  { slug: "mumbai-ndrf" },
     update: {},
-    create: { name: 'Mumbai NDRF District', slug: 'mumbai-ndrf', tier: 'ENTERPRISE' },
-  })
-  console.log(`✓ Organization: ${org.name}`)
+    create: { name: "Mumbai NDRF District", slug: "mumbai-ndrf", tier: "ENTERPRISE" },
+  });
+  console.log("✓ Organisation:", org.name);
 
-  // ─── Users ──────────────────────────────────────────
-  const passwordHash = await bcrypt.hash('password123', 12)
+  // ── Users ─────────────────────────────────────────────────────────────────
+  const [adminHash, opHash] = await Promise.all([
+    bcrypt.hash("admin123",    10),
+    bcrypt.hash("operator123", 10),
+  ]);
 
-  const admin = await prisma.user.upsert({
-    where:  { email: 'admin@pdge.local' },
-    update: {},
-    create: {
-      email: 'admin@pdge.local',
-      passwordHash,
-      name:           'PDGE Admin',
-      role:           'ADMIN',
-      organizationId: org.id,
-    },
-  })
-
-  const operator = await prisma.user.upsert({
-    where:  { email: 'operator@pdge.local' },
+  await prisma.user.upsert({
+    where:  { email: "admin@pdge.local" },
     update: {},
     create: {
-      email: 'operator@pdge.local',
-      passwordHash,
-      name:           'Ops Officer',
-      role:           'OPERATOR',
-      organizationId: org.id,
+      email: "admin@pdge.local", passwordHash: adminHash,
+      name: "Admin", role: Role.ADMIN, organizationId: org.id,
     },
-  })
-  console.log(`✓ Users: admin@pdge.local / operator@pdge.local (password: password123)`)
+  });
+  await prisma.user.upsert({
+    where:  { email: "operator@pdge.local" },
+    update: {},
+    create: {
+      email: "operator@pdge.local", passwordHash: opHash,
+      name: "Operator", role: Role.OPERATOR, organizationId: org.id,
+    },
+  });
+  console.log("✓ Users: admin@pdge.local / admin123 | operator@pdge.local / operator123");
 
-  // ─── 12 Graph Nodes ─────────────────────────────────
-  // These map exactly to the city graph in the PDGE app.
-  // Coordinates are representative Mumbai-area positions.
-  console.log('\nCreating city graph nodes...')
-
+  // ── Graph nodes ───────────────────────────────────────────────────────────
+  // population is required for severity classifier scoring
   const nodeData = [
-    // Depots (resource staging areas)
-    { id: 'node-depot-north', label: 'Depot North',     type: 'DEPOT',    lat: 19.1500, lng: 72.8500, cap: 50,  pop: 0 },
-    { id: 'node-depot-east',  label: 'Depot East',      type: 'DEPOT',    lat: 19.1200, lng: 72.9200, cap: 50,  pop: 0 },
-
-    // Hospitals
-    { id: 'node-hosp-gen',    label: 'General Hosp.',   type: 'HOSPITAL', lat: 19.1100, lng: 72.8400, cap: 200, pop: 0 },
-    { id: 'node-hosp-metro',  label: 'Metro Hospital',  type: 'HOSPITAL', lat: 19.1300, lng: 72.8700, cap: 350, pop: 0 },
-    { id: 'node-hosp-east',   label: 'East Hospital',   type: 'HOSPITAL', lat: 19.1100, lng: 72.9100, cap: 180, pop: 0 },
-
-    // Zones (population areas — can become disaster origins)
-    { id: 'node-zone-alpha',  label: 'Zone Alpha',      type: 'ZONE',     lat: 19.0900, lng: 72.8600, cap: 100, pop: 52000 },
-    { id: 'node-zone-beta',   label: 'Zone Beta',       type: 'ZONE',     lat: 19.0800, lng: 72.8900, cap: 100, pop: 84000 },
-    { id: 'node-zone-gamma',  label: 'Zone Gamma',      type: 'ZONE',     lat: 19.0700, lng: 72.8500, cap: 100, pop: 38000 },
-    { id: 'node-zone-delta',  label: 'Zone Delta',      type: 'ZONE',     lat: 19.0700, lng: 72.9000, cap: 100, pop: 47000 },
-    { id: 'node-city-centre', label: 'City Centre',     type: 'ZONE',     lat: 19.0600, lng: 72.8750, cap: 100, pop: 115000 },
-
-    // Shelters (evacuation points)
-    { id: 'node-shelter-w',   label: 'West Shelter',    type: 'SHELTER',  lat: 19.0600, lng: 72.8350, cap: 500, pop: 0 },
-    { id: 'node-shelter-e',   label: 'East Shelter',    type: 'SHELTER',  lat: 19.0600, lng: 72.9200, cap: 400, pop: 0 },
-  ]
+    { id: "node-depot-n",   label: "North Depot",         type: NodeType.DEPOT,       lat: 19.1200, lng: 72.8650, pop:     0, cap: 200 },
+    { id: "node-depot-s",   label: "South Depot",         type: NodeType.DEPOT,       lat: 18.9400, lng: 72.8350, pop:     0, cap: 200 },
+    { id: "node-hosp-m",    label: "Municipal Hospital",  type: NodeType.HOSPITAL,    lat: 19.0450, lng: 72.8620, pop:   500, cap: 400 },
+    { id: "node-hosp-k",    label: "KEM Hospital",        type: NodeType.HOSPITAL,    lat: 18.9900, lng: 72.8340, pop:   700, cap: 600 },
+    { id: "node-shelter-a", label: "Shelter Alpha",       type: NodeType.SHELTER,     lat: 19.0600, lng: 72.8400, pop:   200, cap: 500 },
+    { id: "node-shelter-b", label: "Shelter Bravo",       type: NodeType.SHELTER,     lat: 19.0100, lng: 72.8700, pop:   150, cap: 500 },
+    { id: "node-zone-beta", label: "Zone Beta (Kurla)",   type: NodeType.ZONE,        lat: 19.0720, lng: 72.8800, pop: 48000, cap: 100 },
+    { id: "node-zone-g",    label: "Zone G (Ghatkopar)",  type: NodeType.ZONE,        lat: 19.0860, lng: 72.9080, pop: 35000, cap: 100 },
+    { id: "node-zone-d",    label: "Zone D (Dharavi)",    type: NodeType.ZONE,        lat: 19.0400, lng: 72.8580, pop: 62000, cap: 100 },
+    { id: "node-zone-a",    label: "Zone A (Andheri)",    type: NodeType.ZONE,        lat: 19.1197, lng: 72.8464, pop: 41000, cap: 100 },
+    { id: "node-zone-c",    label: "Zone C (Chembur)",    type: NodeType.ZONE,        lat: 19.0622, lng: 72.9005, pop: 29000, cap: 100 },
+    { id: "node-chk-1",     label: "Checkpoint LBS Rd",  type: NodeType.CHECKPOINT,  lat: 19.0550, lng: 72.8720, pop:     0, cap:  50 },
+  ];
 
   for (const n of nodeData) {
     await prisma.graphNode.upsert({
       where:  { id: n.id },
-      update: { label: n.label, latitude: n.lat, longitude: n.lng },
+      update: { population: n.pop, label: n.label },
       create: {
-        id:             n.id,
-        organizationId: org.id,
-        label:          n.label,
-        type:           n.type as any,
-        latitude:       n.lat,
-        longitude:      n.lng,
-        capacity:       n.cap,
-        population:     n.pop,
-        disasterRisk:   0,
+        id: n.id, label: n.label, type: n.type,
+        latitude: n.lat, longitude: n.lng,
+        population: n.pop, capacity: n.cap,
+        organizationId: org.id, disasterRisk: 0.0,
       },
-    })
-    console.log(`  ✓ ${n.label} (${n.type})`)
+    });
   }
+  console.log(`✓ ${nodeData.length} graph nodes`);
 
-  // ─── Edges (roads connecting nodes) ─────────────────
-  console.log('\nCreating road network edges...')
+  // ── Edges ─────────────────────────────────────────────────────────────────
+  // Each road entry creates TWO directed edges (bidirectional).
+  // Upsert key = @@unique([fromNodeId, toNodeId]) — fixes re-seed crash.
+  const roads = [
+    { from: "node-depot-n",   to: "node-zone-a",     w:  8.0 },
+    { from: "node-depot-n",   to: "node-hosp-m",     w: 12.0 },
+    { from: "node-depot-n",   to: "node-shelter-a",  w: 10.0 },
+    { from: "node-hosp-m",    to: "node-zone-beta",  w:  7.0 },
+    { from: "node-hosp-m",    to: "node-chk-1",      w:  4.0 },
+    { from: "node-zone-beta", to: "node-zone-g",     w:  6.5 },
+    { from: "node-zone-beta", to: "node-zone-d",     w:  5.0 },
+    { from: "node-zone-beta", to: "node-chk-1",      w:  3.0 },
+    { from: "node-zone-g",    to: "node-zone-c",     w:  7.5 },
+    { from: "node-zone-d",    to: "node-hosp-k",     w:  9.0 },
+    { from: "node-zone-d",    to: "node-shelter-b",  w:  6.0 },
+    { from: "node-hosp-k",    to: "node-depot-s",    w: 11.0 },
+    { from: "node-depot-s",   to: "node-shelter-b",  w:  8.0 },
+    { from: "node-shelter-a", to: "node-zone-a",     w:  5.0 },
+    { from: "node-zone-a",    to: "node-zone-g",     w:  9.0 },
+    { from: "node-chk-1",     to: "node-zone-d",     w:  4.5 },
+    { from: "node-zone-c",    to: "node-shelter-b",  w:  6.0 },
+    { from: "node-zone-c",    to: "node-hosp-k",     w:  8.0 },
+    { from: "node-zone-a",    to: "node-zone-beta",  w: 10.0 },
+    { from: "node-zone-g",    to: "node-hosp-m",     w:  8.5 },
+  ];
 
-  const edgeData = [
-    // From depots
-    ['node-depot-north', 'node-hosp-gen',    1.0],
-    ['node-depot-north', 'node-hosp-metro',  1.8],
-    ['node-depot-east',  'node-hosp-east',   1.0],
-    ['node-depot-east',  'node-hosp-metro',  1.6],
-
-    // Hospitals to zones
-    ['node-hosp-gen',    'node-zone-alpha',  1.2],
-    ['node-hosp-metro',  'node-zone-alpha',  1.0],
-    ['node-hosp-metro',  'node-zone-beta',   1.0],
-    ['node-hosp-east',   'node-zone-beta',   1.2],
-    ['node-hosp-gen',    'node-zone-gamma',  1.6],
-    ['node-hosp-east',   'node-zone-delta',  1.5],
-    ['node-hosp-metro',  'node-city-centre', 1.8],
-
-    // Zone to zone
-    ['node-zone-alpha',  'node-zone-beta',   1.4],
-    ['node-zone-alpha',  'node-zone-gamma',  1.1],
-    ['node-zone-beta',   'node-zone-delta',  1.1],
-    ['node-zone-gamma',  'node-city-centre', 1.0],
-    ['node-zone-delta',  'node-city-centre', 1.0],
-
-    // Shelters
-    ['node-zone-gamma',  'node-shelter-w',   0.9],
-    ['node-shelter-w',   'node-city-centre', 1.3],
-    ['node-zone-delta',  'node-shelter-e',   0.9],
-    ['node-city-centre', 'node-shelter-e',   1.3],
-  ]
-
-  for (const [from, to, weight] of edgeData) {
-    // Create edge in both directions (bidirectional roads)
-    for (const [f, t] of [[from, to], [to, from]]) {
+  let edgeCount = 0;
+  for (const road of roads) {
+    // Forward and reverse directions
+    for (const [f, t] of [[road.from, road.to], [road.to, road.from]]) {
       await prisma.graphEdge.upsert({
-        where: { fromNodeId_toNodeId: { fromNodeId: f as string, toNodeId: t as string } },
-        update: { weight: weight as number },
+        // ← FIXED: upsert by compound unique key, not by generated id
+        where:  { fromNodeId_toNodeId: { fromNodeId: f, toNodeId: t } },
+        update: { weight: road.w },
         create: {
+          fromNodeId: f, toNodeId: t,
+          weight: road.w, status: EdgeStatus.OPEN,
           organizationId: org.id,
-          fromNodeId:     f as string,
-          toNodeId:       t as string,
-          weight:         weight as number,
-          status:         'OPEN',
         },
-      })
+      });
+      edgeCount++;
     }
   }
-  console.log(`  ✓ ${edgeData.length * 2} edges created (${edgeData.length} roads, bidirectional)`)
+  console.log(`✓ ${edgeCount} directed edges (${roads.length} roads × 2)`);
 
-  // ─── Resources ──────────────────────────────────────
-  console.log('\nCreating resource fleet...')
-
+  // ── Resources ─────────────────────────────────────────────────────────────
   const resourceData = [
-    { id: 'res-amb-01', label: 'AMB-01',   type: 'AMBULANCE',   nodeId: 'node-depot-north', cap: 4 },
-    { id: 'res-amb-02', label: 'AMB-02',   type: 'AMBULANCE',   nodeId: 'node-depot-north', cap: 4 },
-    { id: 'res-amb-03', label: 'AMB-03',   type: 'AMBULANCE',   nodeId: 'node-depot-east',  cap: 4 },
-    { id: 'res-amb-04', label: 'AMB-04',   type: 'AMBULANCE',   nodeId: 'node-depot-east',  cap: 4 },
-    { id: 'res-fire-01',label: 'FIRE-01',  type: 'FIRE_TRUCK',  nodeId: 'node-city-centre', cap: 6 },
-    { id: 'res-fire-02',label: 'FIRE-02',  type: 'FIRE_TRUCK',  nodeId: 'node-city-centre', cap: 6 },
-    { id: 'res-team-01',label: 'TEAM-01',  type: 'RESCUE_TEAM', nodeId: 'node-shelter-w',   cap: 10 },
-    { id: 'res-team-02',label: 'TEAM-02',  type: 'RESCUE_TEAM', nodeId: 'node-shelter-e',   cap: 10 },
-  ]
+    { id: "res-amb-01",  label: "AMB-01",   type: ResourceType.AMBULANCE,    node: "node-depot-n" },
+    { id: "res-amb-02",  label: "AMB-02",   type: ResourceType.AMBULANCE,    node: "node-depot-n" },
+    { id: "res-amb-03",  label: "AMB-03",   type: ResourceType.AMBULANCE,    node: "node-depot-s" },
+    { id: "res-amb-04",  label: "AMB-04",   type: ResourceType.AMBULANCE,    node: "node-depot-s" },
+    { id: "res-amb-05",  label: "AMB-05",   type: ResourceType.AMBULANCE,    node: "node-hosp-m"  },
+    { id: "res-team-01", label: "TEAM-01",  type: ResourceType.RESCUE_TEAM,  node: "node-depot-n" },
+    { id: "res-team-02", label: "TEAM-02",  type: ResourceType.RESCUE_TEAM,  node: "node-depot-s" },
+    { id: "res-truck-01",label: "TRUCK-01", type: ResourceType.SUPPLY_TRUCK, node: "node-depot-n" },
+    { id: "res-truck-02",label: "TRUCK-02", type: ResourceType.SUPPLY_TRUCK, node: "node-depot-s" },
+    { id: "res-drone-01",label: "DRONE-01", type: ResourceType.DRONE,        node: "node-depot-n" },
+  ];
 
   for (const r of resourceData) {
     await prisma.resource.upsert({
       where:  { id: r.id },
-      update: {},
+      update: { status: ResourceStatus.IDLE, currentNodeId: r.node },
       create: {
-        id:             r.id,
+        id: r.id, label: r.label, type: r.type,
+        status: ResourceStatus.IDLE, currentNodeId: r.node,
         organizationId: org.id,
-        label:          r.label,
-        type:           r.type as any,
-        status:         'IDLE',
-        currentNodeId:  r.nodeId,
-        capacity:       r.cap,
-        fuelLevel:      1.0,
-        fatigueLevel:   0,
-        skillLevel:     3,
       },
-    })
-    console.log(`  ✓ ${r.label} (${r.type}) at ${r.nodeId}`)
+    });
   }
+  console.log(`✓ ${resourceData.length} resources`);
 
-  // ─── Summary ────────────────────────────────────────
-  const counts = {
-    nodes:     await prisma.graphNode.count({ where: { organizationId: org.id } }),
-    edges:     await prisma.graphEdge.count({ where: { organizationId: org.id } }),
-    resources: await prisma.resource.count({ where: { organizationId: org.id } }),
-    users:     await prisma.user.count({ where: { organizationId: org.id } }),
-  }
-
-  console.log('\n══════════════════════════════════════════')
-  console.log('  ✅ Seed Complete')
-  console.log(`  Organization: ${org.name}`)
-  console.log(`  Nodes:     ${counts.nodes}`)
-  console.log(`  Edges:     ${counts.edges}`)
-  console.log(`  Resources: ${counts.resources}`)
-  console.log(`  Users:     ${counts.users}`)
-  console.log('══════════════════════════════════════════\n')
+  console.log("\nSeed complete.");
+  console.log("Verify: npx prisma studio");
 }
 
 main()
-  .catch((err) => {
-    console.error('Seed failed:', err)
-    process.exit(1)
-  })
-  .finally(() => prisma.$disconnect())
+  .catch(e => { console.error(e); process.exit(1); })
+  .finally(() => prisma.$disconnect());
