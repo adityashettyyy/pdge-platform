@@ -150,11 +150,56 @@ class DigitalTwinService extends EventEmitter {
     const riskMap: Record<string, number> = {};
     for (const node of nodes) {
       riskMap[node.id] = node.disasterRisk;
+      this.riskSnapshot.set(node.id, node.disasterRisk);
     }
 
-    return { nodes, edges, riskMap };
+    return {
+      nodes,
+      edges,
+      riskMap,
+      snapshotAt: new Date().toISOString(),
+    };
+  }
+
+  async loadGraph(organizationId: string) {
+    return this.getGraphSnapshot(organizationId);
+  }
+
+  async getRiskMap(organizationId: string) {
+    // Return the in-memory risk map for now; falls back to DB query if needed.
+    const map: Record<string, number> = {};
+    for (const [nodeId, risk] of this.riskSnapshot.entries()) {
+      map[nodeId] = risk;
+    }
+
+    // If no cached data exists for org, fallback to DB
+    if (Object.keys(map).length === 0) {
+      const nodes = await prisma.graphNode.findMany({
+        where: { organizationId },
+        select: { id: true, disasterRisk: true },
+      });
+      for (const node of nodes) {
+        map[node.id] = node.disasterRisk;
+      }
+    }
+    return map;
+  }
+
+  subscribe(orgId: string, listener: (event: any) => void) {
+    const riskListener = (payload: RiskSpikePayload) =>
+      listener({ type: "RISK_SPIKE", payload, orgId });
+    const edgeListener = (payload: EdgeBlockedPayload) =>
+      listener({ type: "EDGE_BLOCKED", payload, orgId });
+
+    this.on("RISK_SPIKE", riskListener);
+    this.on("EDGE_BLOCKED", edgeListener);
+
+    return () => {
+      this.off("RISK_SPIKE", riskListener);
+      this.off("EDGE_BLOCKED", edgeListener);
+    };
   }
 }
 
 // Singleton — imported by simulation.worker.ts and server.ts
-export const digitalTwin = new DigitalTwinService();
+export const digitalTwinService = new DigitalTwinService();
