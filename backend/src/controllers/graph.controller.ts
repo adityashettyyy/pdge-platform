@@ -2,7 +2,7 @@
 
 import { Request, Response, NextFunction } from 'express'
 import { prisma } from '../config/db'
-import { digitalTwinService } from '../services/digital-twin'
+import { digitalTwinService } from '../services/digital-twin.service'
 import { ApiResponse } from '../types'
 
 // Extend Express Request type
@@ -61,7 +61,7 @@ export const graphController = {
     try {
       const organizationId = req.organizationId!
       const snapshot = await digitalTwinService.loadGraph(organizationId)
-      const riskMap = digitalTwinService.getRiskMap(organizationId)
+      const riskMap = await digitalTwinService.getRiskMap(organizationId)
 
       const response: ApiResponse<any> = {
         success: true,
@@ -97,9 +97,7 @@ export const graphController = {
       }
 
       await digitalTwinService.blockEdge(
-        organizationId,
-        edge.fromNodeId,
-        edge.toNodeId,
+        edge.id,
         reason ?? 'Manual block'
       )
 
