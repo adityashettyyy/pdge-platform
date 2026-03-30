@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import app from './app'
 import { prisma, disconnectDb } from './config/db'
 import { bullMQConnection, redisCache } from './config/redis'
-import { digitalTwinService } from './services/digital-twin'
+import { digitalTwinService } from './services/digital-twin.service'
 import { queueService } from './services/queue'
 
 const PORT = Number(process.env.PORT ?? 3001)
