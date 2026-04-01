@@ -1,14 +1,7 @@
-# models.py
-# Pydantic models — the data contracts between Node.js and Python.
-# Every request body and response is validated against these.
-# If Node.js sends wrong data, Pydantic rejects it with a clear error.
-
 from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
 
-
-# ── Enums ────────────────────────────────────────────────
 
 class NodeType(str, Enum):
     HOSPITAL   = "HOSPITAL"
@@ -44,8 +37,12 @@ class AssignmentPriority(str, Enum):
     HIGH     = "HIGH"
     NORMAL   = "NORMAL"
 
+class SeverityTier(str, Enum):
+    LOW      = "LOW"
+    MEDIUM   = "MEDIUM"
+    HIGH     = "HIGH"
+    CRITICAL = "CRITICAL"
 
-# ── Graph Input ──────────────────────────────────────────
 
 class GraphNodeInput(BaseModel):
     id:           str
@@ -71,82 +68,71 @@ class CityGraphInput(BaseModel):
     nodes:          list[GraphNodeInput]
     edges:          list[GraphEdgeInput]
 
-
-# ── Resource Input ───────────────────────────────────────
-
 class ResourceInput(BaseModel):
-    id:            str
-    label:         str
-    type:          ResourceType
-    currentNodeId: Optional[str] = None
-    capacity:      int   = 4
-    fuelLevel:     float = 1.0
-    fatigueLevel:  float = 0.0
-    skillLevel:    int   = 3
+    id:              str
+    label:           str
+    type:            ResourceType
+    currentNodeId:   Optional[str] = None
+    capacity:        int   = 4
+    fuelLevel:       float = 1.0
+    fatigueLevel:    float = 0.0
+    skillLevel:      int   = 3
     geographicRange: float = 50.0
 
-
-# ── Simulation Request / Response ────────────────────────
-
 class SimulationRequest(BaseModel):
-    incidentId:       str
-    organizationId:   str
-    originNodeId:     str
-    disasterType:     DisasterType
-    graph:            CityGraphInput
+    incidentId:        str
+    organizationId:    str
+    originNodeId:      str
+    disasterType:      DisasterType
+    graph:             CityGraphInput
     spreadCoefficient: float = Field(default=0.35, ge=0.0, le=1.0)
-    ticks:            int   = Field(default=9, ge=1, le=20)
-    # 3 ticks = T+2h, 6 ticks = T+4h, 9 ticks = T+6h
-
-class RiskMap(BaseModel):
-    # nodeId -> risk float 0.0–1.0
-    risks: dict[str, float]
+    ticks:             int   = Field(default=9, ge=1, le=20)
 
 class SimulationResponse(BaseModel):
-    incidentId:   str
-    forecastT2h:  dict[str, float]   # risk map at tick 3
-    forecastT4h:  dict[str, float]   # risk map at tick 6
-    forecastT6h:  dict[str, float]   # risk map at tick 9
-    confidence:   float
+    incidentId:        str
+    forecastT2h:       dict[str, float]
+    forecastT4h:       dict[str, float]
+    forecastT6h:       dict[str, float]
+    confidence:        float
     spreadCoefficient: float
-    ticksRun:     int
-    highRiskNodes: list[str]         # nodes with risk > 0.5
-
-
-# ── Allocation Request / Response ────────────────────────
+    ticksRun:          int
+    highRiskNodes:     list[str]
 
 class AllocationRequest(BaseModel):
-    incidentId:       str
-    organizationId:   str
+    incidentId:         str
+    organizationId:     str
     simulationResultId: str
-    graph:            CityGraphInput
-    resources:        list[ResourceInput]
-    riskMap:          dict[str, float]   # current risk per node
-    forecastT2h:      dict[str, float] = Field(default_factory=dict)
-    forecastT4h:      dict[str, float] = Field(default_factory=dict)
+    disasterType:       DisasterType = DisasterType.UNKNOWN
+    trustScore:         float        = 100.0
+    graph:              CityGraphInput
+    resources:          list[ResourceInput]
+    riskMap:            dict[str, float]
+    forecastT2h:        dict[str, float] = Field(default_factory=dict)
+    forecastT4h:        dict[str, float] = Field(default_factory=dict)
 
 class ResourceAssignmentOutput(BaseModel):
-    resourceId:          str
-    resourceLabel:       str
-    fromNodeId:          str
-    toNodeId:            str
-    routeNodeIds:        list[str]
-    etaMinutes:          float
-    priority:            AssignmentPriority
-    confidence:          float
-    fallbackResourceId:  Optional[str] = None
+    resourceId:         str
+    resourceLabel:      str
+    fromNodeId:         str
+    toNodeId:           str
+    routeNodeIds:       list[str]
+    etaMinutes:         float
+    priority:           AssignmentPriority
+    confidence:         float
+    fallbackResourceId: Optional[str] = None
 
 class AllocationResponse(BaseModel):
-    incidentId:        str
+    incidentId:         str
     simulationResultId: str
-    strategyUsed:      str
-    assignments:       list[ResourceAssignmentOutput]
-    totalResources:    int
-    confidence:        float
-    expiresInMinutes:  int = 30
-
-
-# ── Health ───────────────────────────────────────────────
+    strategyUsed:       str
+    assignments:        list[ResourceAssignmentOutput]
+    totalResources:     int
+    confidence:         float
+    expiresInMinutes:   int = 30
+    severityTier:       SeverityTier = SeverityTier.LOW
+    severityScore:      float        = 0.0
+    demandMatrix:       dict[str, int] = Field(default_factory=dict)
+    shortfalls:         dict[str, int] = Field(default_factory=dict)
 
 class HealthResponse(BaseModel):
     status:  str
