@@ -1,264 +1,167 @@
 # graph/disaster_spread.py
-# BFS Epidemic Spread Simulator — the core prediction engine.
+# BFS disaster spread simulator.
 #
-# CONCEPT:
-#   Disaster spreads like an epidemic across the city graph.
-#   Each tick = ~40 minutes real time.
-#   Tick 3  = T+2h forecast
-#   Tick 6  = T+4h forecast
-#   Tick 9  = T+6h forecast (default)
+# WHAT THIS FILE DOES:
+#   Converts a single origin node into a full city-wide risk map over 9 ticks.
+#   Each tick ≈ 40 real minutes.  Snapshots saved at tick 3/6/9 = T+2h/T+4h/T+6h.
 #
-# SPREAD FORMULA (per tick, per neighbor):
-#   new_risk = current_risk × (spread_coefficient / edge_weight)
-#   Heavy road (high weight) = slower spread
-#   Light road (low weight)  = faster spread
-#
-# DISASTER-TYPE MODIFIERS:
-#   FLOOD      — spreads along low-weight edges fast (water flows)
-#   FIRE       — moderate spread, slows at checkpoints
-#   EARTHQUAKE — radial spread, distance-based decay
-#   CYCLONE    — directional, fast
-#   CHEMICAL   — very fast, wind-direction aware (simplified here)
-#
-# HOW TO TEST STANDALONE:
-#   python tests/test_spread.py
+# HOW A NODE BECOMES AFFECTED:
+#   1. origin node starts at risk = 1.0
+#   2. Each tick: every infected node pushes risk into OPEN/SLOW neighbours
+#      via: newRisk = parentRisk * coeff * edgeFactor * nodeTypeMod
+#   3. neighbour.risk = max(current, incoming)  — never decreases
+#   4. BLOCKED edges are never added to adjacency — disaster cannot cross them
+#   5. After 9 ticks: any node with risk > 0.5 → highRiskNodes list
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
+from __future__ import annotations
+import math
+from models import SimulationRequest, SimulationResponse
 from graph.city_graph import CityGraph
-from models import SimulationRequest, SimulationResponse, DisasterType
-from collections import deque
 
+HIGH_RISK_THRESHOLD = 0.5
 
-# Spread coefficient multipliers per disaster type
-DISASTER_MODIFIERS: dict[str, float] = {
-    DisasterType.FLOOD:      1.4,   # fast — water follows topology
-    DisasterType.FIRE:       1.0,   # moderate
-    DisasterType.EARTHQUAKE: 1.2,   # radial, medium
-    DisasterType.CYCLONE:    1.6,   # very fast
-    DisasterType.LANDSLIDE:  0.8,   # slow, terrain-bound
-    DisasterType.CHEMICAL:   1.5,   # fast, wind-carried
-    DisasterType.UNKNOWN:    1.0,   # default
+# Base spread coefficients per disaster type.
+# PostMortemService updates these in the org metadata after each closed incident.
+DISASTER_COEFFICIENTS: dict[str, float] = {
+    "FLOOD":      0.45,
+    "FIRE":       0.30,
+    "EARTHQUAKE": 0.60,
+    "CYCLONE":    0.50,
+    "LANDSLIDE":  0.35,
+    "CHEMICAL":   0.40,
+    "UNKNOWN":    0.35,
 }
 
-# Node type resistance — some nodes slow spread
-# 1.0 = no resistance, 0.5 = spreads at half rate into this node
-NODE_RESISTANCE: dict[str, float] = {
-    "HOSPITAL":   0.9,   # hospitals have some infrastructure protection
-    "DEPOT":      0.8,   # depots are typically reinforced
-    "SHELTER":    0.9,
-    "ZONE":       1.0,   # residential zones — no resistance
-    "CHECKPOINT": 0.7,   # checkpoints slow spread
+# Structural hardening: how much risk a node type absorbs vs passes through
+NODE_TYPE_MODS: dict[str, float] = {
+    "HOSPITAL":   0.70,   # reinforced structure
+    "DEPOT":      0.80,
+    "SHELTER":    0.85,
+    "ZONE":       1.00,   # residential — most vulnerable
+    "CHECKPOINT": 0.90,
 }
 
 
 class DisasterSpreadSimulator:
-    """
-    BFS-based epidemic spread model adapted for physical disaster propagation.
-
-    Uses modified BFS where:
-      - Each node has a risk value 0.0–1.0
-      - Each tick propagates risk to neighbors
-      - Edge weight inversely affects spread speed
-      - Disaster type applies a global modifier
-    """
-
-    def __init__(self, graph: CityGraph):
+    def __init__(self, graph: CityGraph) -> None:
         self.graph = graph
 
-    # ─────────────────────────────────────────────────
-    # Main entry point
-    # ─────────────────────────────────────────────────
     def simulate(self, request: SimulationRequest) -> SimulationResponse:
-        """
-        Run the full BFS simulation and return 3 forecasts.
-        """
-        print(f"\n[Spread] Starting simulation for incident {request.incidentId}")
-        print(f"[Spread] Origin: {request.originNodeId} | Type: {request.disasterType}")
-        print(f"[Spread] Coefficient: {request.spreadCoefficient} | Ticks: {request.ticks}")
-
-        # Build graph from request
+        # ── 1. Build graph ────────────────────────────────────────────────
         self.graph.build(request.graph)
 
-        # Get disaster modifier
-        modifier = DISASTER_MODIFIERS.get(request.disasterType, 1.0)
-        effective_coefficient = request.spreadCoefficient * modifier
+        # ── 2. Determine effective spread coefficient ─────────────────────
+        # If caller passes a non-default value (from PostMortem learning), use it.
+        base_coeff = DISASTER_COEFFICIENTS.get(
+            request.disasterType.value, 0.35
+        )
+        coeff: float = (
+            request.spreadCoefficient
+            if request.spreadCoefficient != 0.35
+            else base_coeff
+        )
+        coeff = max(0.01, min(coeff, 0.99))   # clamp to safe range
 
-        print(f"[Spread] Effective coefficient: {effective_coefficient:.3f} "
-              f"(base {request.spreadCoefficient} × modifier {modifier})")
-
-        # Initialize risk map — all zeros except origin
-        risk_map: dict[str, float] = {
-            node_id: 0.0
-            for node_id in self.graph.get_all_node_ids()
+        # ── 3. Build node metadata maps ───────────────────────────────────
+        valid_node_ids: set[str] = {n.id for n in request.graph.nodes}
+        node_type_map:  dict[str, str]   = {
+            n.id: n.type.value for n in request.graph.nodes
         }
 
-        if request.originNodeId not in risk_map:
-            print(f"[Spread] WARNING: origin node {request.originNodeId} not in graph!")
-            # Use first node as fallback
-            all_nodes = self.graph.get_all_node_ids()
-            if all_nodes:
-                request.originNodeId = all_nodes[0]
-            else:
-                raise ValueError("Graph has no nodes")
+        # ── 4. Initialise risk map ────────────────────────────────────────
+        # Guard: originNodeId must actually exist in the graph
+        risk: dict[str, float] = {n.id: 0.0 for n in request.graph.nodes}
+        if request.originNodeId in valid_node_ids:
+            risk[request.originNodeId] = 1.0
+        else:
+            # Fallback: use first ZONE node, or first node overall
+            fallback = next(
+                (n.id for n in request.graph.nodes if n.type.value == "ZONE"),
+                request.graph.nodes[0].id if request.graph.nodes else None,
+            )
+            if fallback:
+                risk[fallback] = 1.0
 
-        risk_map[request.originNodeId] = 1.0  # Origin starts at full risk
+        # ── 5. Build adjacency (BLOCKED edges are already excluded in CityGraph,
+        #       but we rebuild here for spread because edgeFactor differs from
+        #       routing weight — SLOW edges reduce spread speed, not increase it)
+        adjacency: dict[str, list[tuple[str, float]]] = {
+            n.id: [] for n in request.graph.nodes
+        }
+        seen_spread_pairs: set[tuple[str, str]] = set()
+        for edge in request.graph.edges:
+            if edge.status.value == "BLOCKED":
+                continue
+            # edgeFactor: SLOW edges reduce spread (congestion slows disaster too)
+            ef = (
+                1.0 / max(float(edge.slowFactor), 1.0)
+                if edge.status.value == "SLOW"
+                else 1.0
+            )
+            for a, b in [
+                (edge.fromNodeId, edge.toNodeId),
+                (edge.toNodeId,   edge.fromNodeId),
+            ]:
+                if a not in valid_node_ids or b not in valid_node_ids:
+                    continue
+                pair = (a, b)
+                if pair not in seen_spread_pairs:
+                    seen_spread_pairs.add(pair)
+                    adjacency[a].append((b, ef))
 
-        # Snapshots at ticks 3, 6, 9
-        snapshot_t2h: dict[str, float] = {}
-        snapshot_t4h: dict[str, float] = {}
-        snapshot_t6h: dict[str, float] = {}
+        # ── 6. Run ticks ─────────────────────────────────────────────────
+        forecast_t2h: dict[str, float] = {}
+        forecast_t4h: dict[str, float] = {}
+        forecast_t6h: dict[str, float] = {}
 
-        # Run ticks
         for tick in range(1, request.ticks + 1):
-            risk_map = self._run_tick(risk_map, effective_coefficient, request.disasterType)
+            new_risk = dict(risk)   # copy — updates based on previous tick only
 
-            # Log progress
-            high_risk = sum(1 for r in risk_map.values() if r > 0.5)
-            print(f"[Spread] Tick {tick:2d} | High-risk nodes: {high_risk} | "
-                  f"Max risk: {max(risk_map.values()):.3f}")
+            for node_id, curr_risk in risk.items():
+                if curr_risk <= 0.0:
+                    continue
+                for neighbor_id, ef in adjacency.get(node_id, []):
+                    mod     = NODE_TYPE_MODS.get(
+                        node_type_map.get(neighbor_id, "ZONE"), 1.0
+                    )
+                    incoming = curr_risk * coeff * ef * mod
+                    incoming = min(incoming, 1.0)          # cap at 1.0
+                    new_risk[neighbor_id] = max(
+                        new_risk.get(neighbor_id, 0.0), incoming
+                    )
 
-            # Capture snapshots
+            risk = new_risk
+
             if tick == 3:
-                snapshot_t2h = dict(risk_map)
+                forecast_t2h = dict(risk)
             if tick == 6:
-                snapshot_t4h = dict(risk_map)
+                forecast_t4h = dict(risk)
             if tick == 9:
-                snapshot_t6h = dict(risk_map)
+                forecast_t6h = dict(risk)
 
-        # If ticks < 9, fill missing snapshots with last state
-        if not snapshot_t2h:
-            snapshot_t2h = dict(risk_map)
-        if not snapshot_t4h:
-            snapshot_t4h = dict(risk_map)
-        if not snapshot_t6h:
-            snapshot_t6h = dict(risk_map)
+        # Fill missing snapshots (when ticks < 9)
+        forecast_t2h = forecast_t2h or dict(risk)
+        forecast_t4h = forecast_t4h or dict(risk)
+        forecast_t6h = forecast_t6h or dict(risk)
 
-        # High risk nodes at T+6h
+        # ── 7. Derive outputs ─────────────────────────────────────────────
         high_risk_nodes = [
-            node_id for node_id, risk in snapshot_t6h.items()
-            if risk > 0.5
+            nid for nid, r in risk.items() if r > HIGH_RISK_THRESHOLD
         ]
 
-        # Confidence — based on graph connectivity and spread predictability
-        confidence = self._calculate_confidence(request, snapshot_t6h)
-
-        print(f"\n[Spread] Complete | High-risk at T+6h: {len(high_risk_nodes)} nodes")
-        print(f"[Spread] Confidence: {confidence:.2f}")
+        # Confidence degrades as more nodes become high-risk
+        # (wider spread = more uncertainty in exact boundaries)
+        n_total      = max(len(risk), 1)
+        n_high       = len(high_risk_nodes)
+        confidence   = max(0.30, 1.0 - (n_high / n_total) * 0.5)
 
         return SimulationResponse(
             incidentId=request.incidentId,
-            forecastT2h={k: round(v, 4) for k, v in snapshot_t2h.items()},
-            forecastT4h={k: round(v, 4) for k, v in snapshot_t4h.items()},
-            forecastT6h={k: round(v, 4) for k, v in snapshot_t6h.items()},
-            confidence=confidence,
-            spreadCoefficient=effective_coefficient,
+            forecastT2h={k: round(v, 4) for k, v in forecast_t2h.items()},
+            forecastT4h={k: round(v, 4) for k, v in forecast_t4h.items()},
+            forecastT6h={k: round(v, 4) for k, v in forecast_t6h.items()},
+            confidence=round(confidence, 3),
+            spreadCoefficient=round(coeff, 4),
             ticksRun=request.ticks,
             highRiskNodes=high_risk_nodes,
         )
-
-    # ─────────────────────────────────────────────────
-    # Single BFS tick
-    # ─────────────────────────────────────────────────
-    def _run_tick(
-        self,
-        current_risk: dict[str, float],
-        coefficient: float,
-        disaster_type: str,
-    ) -> dict[str, float]:
-        """
-        One simulation tick — propagate risk to all neighbors.
-
-        Formula:
-          spread_amount = source_risk × (coefficient / edge_weight)
-          new_risk = max(current_risk, spread_amount × node_resistance)
-
-        We use max() not addition so risk caps at 1.0 naturally.
-        """
-        new_risk = dict(current_risk)  # copy current state
-
-        # Only propagate from nodes that actually have risk
-        active_nodes = [
-            node_id for node_id, risk in current_risk.items()
-            if risk > 0.01  # ignore negligible risk
-        ]
-
-        for node_id in active_nodes:
-            source_risk = current_risk[node_id]
-            neighbors   = self.graph.get_neighbors(node_id)
-
-            for neighbor_id, edge_weight in neighbors:
-                # Higher edge weight = slower spread
-                # Edge weight is travel time in minutes
-                # Normalize: weight 1.0 = full spread, weight 5.0 = 20% spread
-                spread_factor = coefficient / max(edge_weight, 0.1)
-
-                # Cap spread factor at 0.95 — risk never fully transfers in one tick
-                spread_factor = min(spread_factor, 0.95)
-
-                # Apply node resistance
-                node = self.graph.get_node(neighbor_id)
-                node_type = node.get("node_type", "ZONE") if node else "ZONE"
-                # node_type may be an enum value or string
-                node_type_str = node_type.value if hasattr(node_type, 'value') else str(node_type)
-                resistance = NODE_RESISTANCE.get(node_type_str, 1.0)
-
-                spread_amount = source_risk * spread_factor * resistance
-
-                # New risk is the max of current and incoming spread
-                new_risk[neighbor_id] = min(
-                    1.0,
-                    max(new_risk[neighbor_id], spread_amount)
-                )
-
-        # Apply decay at origin — disaster doesn't stay at full intensity forever
-        # 2% decay per tick at origin after first tick
-        origin_risk = new_risk.get(list(current_risk.keys())[0], 0)
-        if origin_risk > 0:
-            for node_id in active_nodes:
-                if current_risk[node_id] == 1.0:  # this is origin
-                    new_risk[node_id] = max(0.7, new_risk[node_id] * 0.98)
-
-        return new_risk
-
-    # ─────────────────────────────────────────────────
-    # Confidence calculation
-    # ─────────────────────────────────────────────────
-    def _calculate_confidence(
-        self,
-        request: SimulationRequest,
-        final_risk: dict[str, float],
-    ) -> float:
-        """
-        Confidence in the simulation result.
-        Higher when:
-          - Graph is well-connected (more data)
-          - Disaster type has a known spread pattern
-          - Origin node is clearly identified
-
-        Starts at 0.85 and adjusts based on factors.
-        """
-        confidence = 0.85
-
-        # Well-known disaster types have higher confidence
-        high_confidence_types = {
-            DisasterType.FLOOD, DisasterType.FIRE, DisasterType.EARTHQUAKE
-        }
-        if request.disasterType in high_confidence_types:
-            confidence += 0.05
-
-        # More nodes = more data = higher confidence (up to a point)
-        node_count = self.graph.node_count()
-        if node_count >= 10:
-            confidence += 0.02
-        if node_count >= 20:
-            confidence += 0.02
-
-        # If spread is very contained (origin only), lower confidence
-        # — may mean graph connectivity issue
-        nodes_with_risk = sum(1 for r in final_risk.values() if r > 0.1)
-        if nodes_with_risk <= 1:
-            confidence -= 0.2
-
-        return round(min(0.99, max(0.30, confidence)), 2)
