@@ -1,0 +1,18 @@
+import { api } from "./api";
+import type { GraphSnapshot, Resource, Incident, DashboardKPIs, LoginResponse, AuthUser, ReportResponse, AllocationPlan, DisasterType } from "./types";
+export const login = (email:string, password:string) => api.post<LoginResponse>("/auth/login", { email, password });
+export const fetchMe = () => api.get<AuthUser>("/auth/me");
+export const fetchDashboardKPIs = () => api.get<DashboardKPIs>("/dashboard/kpis");
+export const fetchGraphSnapshot = () => api.get<GraphSnapshot>("/graph/snapshot");
+export const fetchResources = () => api.get<Resource[]>("/resources");
+export const fetchIncidents = () => api.get<Incident[]>("/incidents");
+export const fetchIncident = (id:string) => api.get<Incident>(`/incidents/${id}`);
+export const reportIncident = (body:{type:DisasterType;latitude:number;longitude:number;originNodeId:string;gpsValid:boolean;description?:string}) => api.post<ReportResponse>("/incidents/report", body);
+export const addReport = (id:string, body:{gpsValid:boolean;latitude?:number;longitude?:number}) => api.post(`/incidents/${id}/report`, body);
+export const closeIncident = (id:string) => api.post<Incident>(`/incidents/${id}/close`);
+export const fetchAllocationPlans = () => api.get<AllocationPlan[]>("/allocation-plans");
+export const approvePlan = (id:string) => api.post<AllocationPlan>(`/allocation-plans/${id}/approve`);
+export const generateSitrep = (id:string) => api.post<{sitrep:string}>(`/commander/sitrep/${id}`);
+export const fetchMonthlyStats = () => api.get<any[]>("/analytics/monthly");
+export const fetchZoneResponseTimes = () => api.get<any[]>("/analytics/response-times");
+export const fetchDisasterTypeStats = () => api.get<any[]>("/analytics/disaster-types");
