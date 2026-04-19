@@ -1,0 +1,335 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  AGENCY_LEAD
+  OPERATOR
+  VIEWER
+}
+
+model User {
+  id             String        @id @default(uuid())
+  email          String        @unique
+  passwordHash   String
+  name           String
+  role           Role          @default(VIEWER)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  incidents      Incident[]
+  auditLogs      AuditLog[]
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  @@index([email])
+  @@index([organizationId])
+}
+
+model Organization {
+  id         String      @id @default(uuid())
+  name       String
+  slug       String      @unique
+  tier       String      @default("STANDARD")
+  isActive   Boolean     @default(true)
+  metadata   Json?
+  users      User[]
+  graphNodes GraphNode[]
+  graphEdges GraphEdge[]
+  resources  Resource[]
+  incidents  Incident[]
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  @@index([slug])
+}
+
+enum NodeType {
+  HOSPITAL
+  DEPOT
+  SHELTER
+  ZONE
+  CHECKPOINT
+}
+
+model GraphNode {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  label          String
+  type           NodeType
+  latitude       Float
+  longitude      Float
+  capacity       Int          @default(100)
+  currentLoad    Int          @default(0)
+  population     Int          @default(0)
+  disasterRisk   Float        @default(0)
+  isActive       Boolean      @default(true)
+  metadata       Json?
+  edgesFrom      GraphEdge[]  @relation("EdgeFrom")
+  edgesTo        GraphEdge[]  @relation("EdgeTo")
+  resources      Resource[]
+  incidents      Incident[]   @relation("OriginNode")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  @@index([organizationId])
+  @@index([type])
+  @@index([disasterRisk])
+}
+
+enum EdgeStatus {
+  OPEN
+  SLOW
+  BLOCKED
+}
+
+model GraphEdge {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  fromNodeId     String
+  fromNode       GraphNode    @relation("EdgeFrom", fields: [fromNodeId], references: [id])
+  toNodeId       String
+  toNode         GraphNode    @relation("EdgeTo", fields: [toNodeId], references: [id])
+  weight         Float        @default(1.0)
+  status         EdgeStatus   @default(OPEN)
+  slowFactor     Float        @default(1.0)
+  blockedReason  String?
+  distance       Float?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  @@unique([fromNodeId, toNodeId])
+  @@index([organizationId])
+  @@index([status])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+}
+
+enum ResourceType {
+  AMBULANCE
+  FIRE_TRUCK
+  RESCUE_TEAM
+  DRONE
+  SUPPLY_TRUCK
+  HELICOPTER
+}
+
+enum ResourceStatus {
+  IDLE
+  TRANSIT
+  DEPLOYED
+  MAINTENANCE
+  PRE_POSITIONED
+}
+
+model Resource {
+  id              String           @id @default(uuid())
+  organizationId  String
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  label           String
+  type            ResourceType
+  status          ResourceStatus   @default(IDLE)
+  currentNodeId   String?
+  currentNode     GraphNode?       @relation(fields: [currentNodeId], references: [id])
+  targetNodeId    String?
+  routeEdgeIds    String[]
+  etaMinutes      Int?
+  capacity        Int              @default(4)
+  fuelLevel       Float            @default(1.0)
+  fatigueLevel    Float            @default(0.0)
+  skillLevel      Int              @default(3)
+  geographicRange Float            @default(50.0)
+  isActive        Boolean          @default(true)
+  metadata        Json?
+  assignments     ResourceAssignment[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  @@index([organizationId])
+  @@index([status])
+  @@index([currentNodeId])
+  @@index([type])
+}
+
+enum DisasterType {
+  FLOOD
+  FIRE
+  EARTHQUAKE
+  CYCLONE
+  LANDSLIDE
+  CHEMICAL
+  UNKNOWN
+}
+
+enum IncidentStatus {
+  UNVERIFIED
+  VERIFIED
+  ACTIVE
+  MONITORING
+  CLOSED
+}
+
+model Incident {
+  id             String         @id @default(uuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  type           DisasterType   @default(UNKNOWN)
+  status         IncidentStatus @default(UNVERIFIED)
+  description    String?
+  originNodeId   String?
+  originNode     GraphNode?     @relation("OriginNode", fields: [originNodeId], references: [id])
+  trustScore     Float          @default(0)
+  reportCount    Int            @default(0)
+  verifiedAt     DateTime?
+  closedAt       DateTime?
+  reportedById   String?
+  reportedBy     User?          @relation(fields: [reportedById], references: [id])
+  latitude       Float?
+  longitude      Float?
+  photoUrls      String[]
+  trustScores    TrustScore[]
+  simResults     SimulationResult[]
+  auditLogs      AuditLog[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  @@index([organizationId])
+  @@index([status])
+  @@index([type])
+  @@index([originNodeId])
+}
+
+enum TrustVerdict {
+  UNVERIFIED
+  ACCUMULATING
+  VERIFIED
+  REJECTED
+}
+
+model TrustScore {
+  id             String       @id @default(uuid())
+  incidentId     String
+  incident       Incident     @relation(fields: [incidentId], references: [id])
+  score          Float
+  verdict        TrustVerdict @default(UNVERIFIED)
+  gpsValid       Boolean      @default(false)
+  clusterCount   Int          @default(1)
+  sensorData     Json?
+  reporterHistory Float       @default(0.5)
+  reporterLat    Float?
+  reporterLng    Float?
+  claimedNodeId  String?
+  distanceToNode Float?
+  createdAt      DateTime     @default(now())
+  @@index([incidentId])
+  @@index([verdict])
+}
+
+enum SimulationStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model SimulationResult {
+  id                String           @id @default(uuid())
+  incidentId        String
+  incident          Incident         @relation(fields: [incidentId], references: [id])
+  status            SimulationStatus @default(PENDING)
+  disasterType      DisasterType
+  forecastT2h       Json?
+  forecastT4h       Json?
+  forecastT6h       Json?
+  spreadCoefficient Float            @default(0.35)
+  originRisk        Float            @default(1.0)
+  predictionErrorT2h Float?
+  predictionErrorT4h Float?
+  predictionErrorT6h Float?
+  overallAccuracy   Float?
+  confidence        Float?
+  algorithmUsed     String?
+  severityTier      String?
+  severityScore     Float?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  allocationPlans   AllocationPlan[]
+  createdAt         DateTime         @default(now())
+  @@index([incidentId])
+  @@index([status])
+}
+
+enum PlanStatus {
+  GENERATED
+  PENDING_APPROVAL
+  APPROVED
+  OVERRIDDEN
+  EXPIRED
+}
+
+model AllocationPlan {
+  id                 String           @id @default(uuid())
+  simulationResultId String
+  simulationResult   SimulationResult @relation(fields: [simulationResultId], references: [id])
+  status             PlanStatus       @default(GENERATED)
+  strategyUsed       String
+  confidence         Float            @default(0)
+  totalResources     Int              @default(0)
+  humanApproved      Boolean          @default(false)
+  approvedById       String?
+  approvedAt         DateTime?
+  overrideReason     String?
+  expiresAt          DateTime?
+  assignments        ResourceAssignment[]
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  @@index([simulationResultId])
+  @@index([status])
+}
+
+enum AssignmentPriority {
+  CRITICAL
+  HIGH
+  NORMAL
+}
+
+model ResourceAssignment {
+  id               String             @id @default(uuid())
+  planId           String
+  plan             AllocationPlan     @relation(fields: [planId], references: [id])
+  resourceId       String
+  resource         Resource           @relation(fields: [resourceId], references: [id])
+  fromNodeId       String
+  toNodeId         String
+  routeEdgeIds     String[]
+  etaMinutes       Float
+  priority         AssignmentPriority @default(NORMAL)
+  confidence       Float              @default(0)
+  fallbackResourceId String?
+  dispatchedAt     DateTime?
+  arrivedAt        DateTime?
+  actualEtaMinutes Float?
+  createdAt        DateTime           @default(now())
+  @@index([planId])
+  @@index([resourceId])
+  @@index([priority])
+}
+
+model AuditLog {
+  id         String    @id @default(uuid())
+  incidentId String?
+  incident   Incident? @relation(fields: [incidentId], references: [id])
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id])
+  action     String
+  entity     String
+  entityId   String?
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+  @@index([incidentId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
