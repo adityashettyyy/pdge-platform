@@ -16,8 +16,8 @@ wss.on("connection", (ws: WebSocket, req) => {
   const orgId = url.searchParams.get("orgId");
   if (!orgId) { ws.close(1008, "orgId required"); return; }
   console.log(`[WS] Client connected for org ${orgId}`);
-  const unsub = digitalTwinService.subscribe(orgId, (event: any) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
+  const unsub = digitalTwinService.subscribe(orgId, (msg) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   });
   ws.on("close", () => { unsub(); console.log(`[WS] Client disconnected`); });
   ws.on("error", (e: Error) => console.error("[WS] Error:", e.message));

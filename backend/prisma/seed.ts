@@ -23,7 +23,7 @@ async function main() {
     { id: "node-zone-c",    label: "Zone C (Chembur)",   type: NodeType.ZONE,        lat: 19.0622, lng: 72.9005, pop: 29000, cap: 100 },
     { id: "node-chk-1",     label: "Checkpoint LBS",     type: NodeType.CHECKPOINT,  lat: 19.0550, lng: 72.8720, pop:     0, cap:  50 },
   ];
-  for (const n of nodes) await prisma.graphNode.upsert({ where: { id: n.id }, update: { population: n.pop }, create: { id: n.id, label: n.label, type: n.type, latitude: n.lat, longitude: n.lng, population: n.pop, capacity: n.cap, organizationId: org.id, disasterRisk: 0 } });
+  for (const n of nodes) await prisma.graphNode.upsert({ where: { id: n.id }, update: { population: n.pop, disasterRisk: 0 }, create: { id: n.id, label: n.label, type: n.type, latitude: n.lat, longitude: n.lng, population: n.pop, capacity: n.cap, organizationId: org.id, disasterRisk: 0 } });
   console.log(`✓ ${nodes.length} nodes`);
   const roads = [
     ["node-depot-n","node-zone-a",8],["node-depot-n","node-hosp-m",12],["node-depot-n","node-shelter-a",10],
@@ -37,7 +37,7 @@ async function main() {
   let ec = 0;
   for (const [f,t,w] of roads as any[]) {
     for (const [a,b] of [[f,t],[t,f]]) {
-      await prisma.graphEdge.upsert({ where: { fromNodeId_toNodeId: { fromNodeId: a, toNodeId: b } }, update: { weight: w }, create: { fromNodeId: a, toNodeId: b, weight: w, status: EdgeStatus.OPEN, organizationId: org.id } });
+      await prisma.graphEdge.upsert({ where: { fromNodeId_toNodeId: { fromNodeId: a, toNodeId: b } }, update: { weight: w, status: EdgeStatus.OPEN }, create: { fromNodeId: a, toNodeId: b, weight: w, status: EdgeStatus.OPEN, organizationId: org.id } });
       ec++;
     }
   }
@@ -54,7 +54,7 @@ async function main() {
     { id: "res-truck-02",label: "TRUCK-02", type: ResourceType.SUPPLY_TRUCK, node: "node-depot-s" },
     { id: "res-drone-01",label: "DRONE-01", type: ResourceType.DRONE,        node: "node-depot-n" },
   ];
-  for (const r of resources) await prisma.resource.upsert({ where: { id: r.id }, update: {}, create: { id: r.id, label: r.label, type: r.type, status: ResourceStatus.IDLE, currentNodeId: r.node, organizationId: org.id } });
+  for (const r of resources) await prisma.resource.upsert({ where: { id: r.id }, update: { status: ResourceStatus.IDLE, currentNodeId: r.node, targetNodeId: null, etaMinutes: null }, create: { id: r.id, label: r.label, type: r.type, status: ResourceStatus.IDLE, currentNodeId: r.node, organizationId: org.id } });
   console.log(`✓ ${resources.length} resources`);
   console.log("\n✅ Seed complete. Login: admin@pdge.local / admin123");
 }

@@ -15,7 +15,7 @@
     "db:demo": "ts-node -r dotenv/config prisma/demo-seed.ts",
     "worker:all": "concurrently \"npm run worker:trust\" \"npm run worker:simulation\"",
     "test:trust": "ts-node src/__tests__/trust-score.test.ts",
-    "test:all":   "npm run test:trust"
+    "test:all": "npm run test:trust"
   },
   "dependencies": {
     "@prisma/client": "^6.7.0",
@@ -43,6 +43,7 @@
     "prisma": "^6.7.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "concurrently": "^8.2.2"
   }
 }
