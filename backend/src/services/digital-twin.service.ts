@@ -49,13 +49,18 @@ class DigitalTwinService extends EventEmitter {
     return { nodes, edges, riskMap };
   }
 
-  subscribe(orgId: string, cb: (event: any) => void) {
-    const handler = (event: any) => cb(event);
-    this.on("RISK_SPIKE", handler);
-    this.on("EDGE_BLOCKED", handler);
-    this.on("SIMULATION_COMPLETE", handler);
-    this.on("ALLOCATION_APPROVED", handler);
-    return () => { this.off("RISK_SPIKE", handler); this.off("EDGE_BLOCKED", handler); this.off("SIMULATION_COMPLETE", handler); this.off("ALLOCATION_APPROVED", handler); };
+  subscribe(orgId: string, cb: (msg: { type: string; payload: any }) => void) {
+    // Each event type gets its own named handler so we can cleanly unsubscribe.
+    // Wraps payload with { type, payload } so the frontend dispatch() switch-case
+    // can read msg.type correctly (previously the raw payload was sent directly,
+    // making msg.type undefined and silently dropping all live updates).
+    const WS_EVENTS = ["RISK_SPIKE", "EDGE_BLOCKED", "SIMULATION_COMPLETE", "ALLOCATION_APPROVED"] as const;
+    const handlers: Record<string, (payload: any) => void> = {};
+    for (const evt of WS_EVENTS) {
+      handlers[evt] = (payload: any) => cb({ type: evt, payload });
+      this.on(evt, handlers[evt]);
+    }
+    return () => { for (const evt of WS_EVENTS) this.off(evt, handlers[evt]); };
   }
 
   async loadGraph(orgId: string) { return this.getGraphSnapshot(orgId); }
