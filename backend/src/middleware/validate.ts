@@ -1,43 +1,50 @@
-import rateLimit from "express-rate-limit";
+import { Request, Response, NextFunction } from "express";
+import { z, ZodSchema } from "zod";
 
-// Login: 10 attempts per 15 minutes per IP — prevents credential stuffing
-export const loginLimiter = rateLimit({
-  windowMs: 15 * 60_000,
-  max: 10,
-  message: { error: "Too many login attempts. Try again in 15 minutes." },
-  standardHeaders: true,
-  legacyHeaders: false,
+export const validate = (schema: ZodSchema) => (req: Request, res: Response, next: NextFunction) => {
+  const result = schema.safeParse(req.body);
+  if (!result.success) {
+    res.status(400).json({
+      error: "Validation failed",
+      issues: result.error.issues.map(i => ({ field: i.path.join("."), message: i.message })),
+    });
+    return;
+  }
+  req.body = result.data;
+  next();
+};
+
+// ── Schemas ────────────────────────────────────────────────────────────────
+
+export const ReportIncidentSchema = z.object({
+  type: z.enum(["FLOOD","FIRE","EARTHQUAKE","CYCLONE","LANDSLIDE","CHEMICAL","UNKNOWN"]),
+  latitude:     z.number().min(-90).max(90),
+  longitude:    z.number().min(-180).max(180),
+  originNodeId: z.string().min(1),
+  gpsValid:     z.boolean().optional().default(false),
+  description:  z.string().max(1000).optional(),
 });
 
-// Report submission: 20 per hour per IP — prevents fake report flooding
-// A real user submitting 20 legitimate reports per hour is already extreme
-export const reportLimiter = rateLimit({
-  windowMs: 60 * 60_000,
-  max: 20,
-  message: { error: "Report rate limit exceeded. Maximum 20 reports per hour." },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    // Key by IP + orgId to prevent cross-org pollution
-    const orgId = (req as any).user?.organizationId ?? "anon";
-    return `${req.ip}:${orgId}`;
-  },
+export const AddReportSchema = z.object({
+  gpsValid:  z.boolean().optional().default(false),
+  latitude:  z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  sensorData: z.object({
+    accelerometerSpike: z.boolean().optional(),
+    soundLevel:         z.number().min(0).max(200).optional(),
+    pressureDrop:       z.boolean().optional(),
+  }).optional(),
 });
 
-// Sitrep generation: 30 per hour — Claude API cost control
-export const sitrepLimiter = rateLimit({
-  windowMs: 60 * 60_000,
-  max: 30,
-  message: { error: "Sitrep generation rate limit exceeded." },
-  standardHeaders: true,
-  legacyHeaders: false,
+export const LoginSchema = z.object({
+  email:    z.string().email("Invalid email"),
+  password: z.string().min(6, "Password too short"),
 });
 
-// Plan approval: 50 per hour — soft guard
-export const approvalLimiter = rateLimit({
-  windowMs: 60 * 60_000,
-  max: 50,
-  message: { error: "Approval rate limit exceeded." },
-  standardHeaders: true,
-  legacyHeaders: false,
+export const BlockEdgeSchema = z.object({
+  reason: z.string().max(200).optional(),
+});
+
+export const OverridePlanSchema = z.object({
+  reason: z.string().min(1, "Override reason required").max(500),
 });
