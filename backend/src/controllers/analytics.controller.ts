@@ -1,8 +1,9 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth";
 import { prisma } from "../config/db";
+import { asyncHandler } from "../middleware/error";
 
-export const getMonthlyStats = async (req: AuthRequest, res: Response) => {
+export const getMonthlyStats = asyncHandler(async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.organizationId;
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const now = new Date();
@@ -14,8 +15,6 @@ export const getMonthlyStats = async (req: AuthRequest, res: Response) => {
       prisma.incident.count({ where: { organizationId: orgId, createdAt: { gte: d, lt: next } } }),
       prisma.incident.count({ where: { organizationId: orgId, status: "CLOSED", closedAt: { gte: d, lt: next } } }),
     ]);
-
-    // avgResponseTime: mean of minimum ETA across approved plans in this month
     const plans = await prisma.allocationPlan.findMany({
       where: {
         status: "APPROVED",
@@ -25,26 +24,24 @@ export const getMonthlyStats = async (req: AuthRequest, res: Response) => {
       include: { assignments: { select: { etaMinutes: true } } },
     });
     const etas = plans
-      .map(p => Math.min(...(p.assignments.map(a => a.etaMinutes))))
+      .filter(p => p.assignments.length > 0)
+      .map(p => Math.min(...p.assignments.map(a => a.etaMinutes).filter(e => e > 0)))
       .filter(e => isFinite(e) && e > 0);
     const avgResponseTime = etas.length > 0
       ? parseFloat((etas.reduce((a, b) => a + b, 0) / etas.length).toFixed(1))
       : null;
-
     stats.push({ month: months[d.getMonth()], incidents, resolved, avgResponseTime });
   }
   res.json({ success: true, data: stats });
-};
+});
 
-export const getZoneResponseTimes = async (req: AuthRequest, res: Response) => {
+export const getZoneResponseTimes = asyncHandler(async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.organizationId;
   const zones = await prisma.graphNode.findMany({
     where: { organizationId: orgId, type: "ZONE" },
     select: { id: true, label: true },
   });
-
   const data = await Promise.all(zones.map(async zone => {
-    // All assignments whose target is this zone node
     const assignments = await prisma.resourceAssignment.findMany({
       where: { toNodeId: zone.id },
       select: { etaMinutes: true },
@@ -55,12 +52,11 @@ export const getZoneResponseTimes = async (req: AuthRequest, res: Response) => {
       : null;
     return { zone: zone.label, avgMinutes, sampleCount: etas.length };
   }));
+  // Return ALL zones — frontend shows "no data" for null ones rather than hiding them
+  res.json({ success: true, data });
+});
 
-  // Only return zones that have real data; frontend handles empty gracefully
-  res.json({ success: true, data: data.filter(d => d.avgMinutes !== null) });
-};
-
-export const getDisasterTypeStats = async (req: AuthRequest, res: Response) => {
+export const getDisasterTypeStats = asyncHandler(async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.organizationId;
   const incidents = await prisma.incident.findMany({
     where: { organizationId: orgId },
@@ -75,29 +71,32 @@ export const getDisasterTypeStats = async (req: AuthRequest, res: Response) => {
     percentage: Math.round((count / total) * 100),
   }));
   res.json({ success: true, data });
-};
+});
 
-export const getPerformanceKPIs = async (req: AuthRequest, res: Response) => {
+export const getPerformanceKPIs = asyncHandler(async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.organizationId;
-
-  // Real average response time from approved plans
   const allApprovedPlans = await prisma.allocationPlan.findMany({
     where: { status: "APPROVED", simulationResult: { incident: { organizationId: orgId } } },
     include: { assignments: { select: { etaMinutes: true } } },
   });
   const allEtas = allApprovedPlans
-    .map(p => Math.min(...p.assignments.map(a => a.etaMinutes)))
-    .filter(e => isFinite(e) && e > 0);
+    .filter(p => p.assignments.length > 0)
+    .map(p => {
+      const validEtas = p.assignments.map(a => a.etaMinutes).filter(e => e > 0);
+      return validEtas.length > 0 ? Math.min(...validEtas) : null;
+    })
+    .filter((e): e is number => e !== null && isFinite(e));
+
   const avgResponse = allEtas.length > 0
     ? parseFloat((allEtas.reduce((a, b) => a + b, 0) / allEtas.length).toFixed(1))
     : null;
 
-  // Real accuracy from SimulationResult
+  // FIX: also count simulations that have accuracy from postmortem
   const sims = await prisma.simulationResult.findMany({
     where: { status: "COMPLETED", overallAccuracy: { not: null }, incident: { organizationId: orgId } },
     select: { overallAccuracy: true },
   });
-  const accuracies = sims.map(s => s.overallAccuracy as number).filter(a => a > 0);
+  const accuracies = sims.map(s => s.overallAccuracy as number).filter(a => a >= 0);
   const avgAccuracy = accuracies.length > 0
     ? Math.round(accuracies.reduce((a, b) => a + b, 0) / accuracies.length * 100)
     : null;
@@ -115,4 +114,4 @@ export const getPerformanceKPIs = async (req: AuthRequest, res: Response) => {
       totalSimulations: sims.length,
     },
   });
-};
+});

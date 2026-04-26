@@ -1,8 +1,9 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth";
 import { prisma } from "../config/db";
+import { asyncHandler } from "../middleware/error";
 
-export const generateSitrep = async (req: AuthRequest, res: Response) => {
+export const generateSitrep = asyncHandler(async (req: AuthRequest, res: Response) => {
   const incident = await prisma.incident.findUnique({
     where: { id: req.params.id },
     include: { originNode: true, simResults: { orderBy: { createdAt: "desc" }, take: 1, include: { allocationPlans: { take: 1, include: { assignments: { include: { resource: true } } } } } } },
@@ -24,16 +25,31 @@ STRATEGY: ${plan?.strategyUsed ?? "Pending"}
 
 Write a 3-paragraph sitrep: (1) current situation, (2) predicted spread and risk, (3) recommended actions. Be specific and actionable.`;
 
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY!, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 800, messages: [{ role: "user", content: prompt }] }),
-    });
-    const data = await response.json() as any;
-    const sitrep = data.content?.[0]?.text ?? "Unable to generate sitrep.";
-    res.json({ success: true, data: { sitrep } });
-  } catch (e: any) {
-    res.json({ success: true, data: { sitrep: `Sitrep for ${incident.type} incident at ${incident.originNode?.label}. Trust score: ${incident.trustScore.toFixed(0)}. Status: ${incident.status}. Severity: ${sim?.severityTier ?? "assessing"}. ${plan?.totalResources ?? 0} resources assigned.` } });
+  const apiKey = process.env.GROQ_API_KEY;
+  console.log("GROQ_API_KEY present:", !!apiKey, "| starts with:", apiKey?.slice(0, 8));
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.1-8b-instant",
+      max_tokens: 800,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const data = await response.json() as any;
+  console.log("Groq response status:", response.status);
+  console.log("Groq response body:", JSON.stringify(data).slice(0, 300));
+
+  if (!response.ok) {
+    res.status(500).json({ error: "Groq API error", detail: data });
+    return;
   }
-};
+
+  const sitrep = data.choices?.[0]?.message?.content ?? "Unable to generate sitrep.";
+  res.json({ success: true, data: { sitrep } });
+});

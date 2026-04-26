@@ -1,8 +1,9 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/auth";
 import { prisma } from "../config/db";
+import { asyncHandler } from "../middleware/error";
 
-export const getKPIs = async (req: AuthRequest, res: Response) => {
+export const getKPIs = asyncHandler(async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.organizationId;
 
   const [
@@ -36,4 +37,4 @@ export const getKPIs = async (req: AuthRequest, res: Response) => {
     success: true,
     data: { activeIncidents, verifiedIncidents, resourcesDeployed, resourcesAvailable, avgResponseTimeMin, simulationsRun, plansAwaitingApproval },
   });
-};
+});
